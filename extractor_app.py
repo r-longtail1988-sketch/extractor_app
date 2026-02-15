@@ -1,5 +1,5 @@
 import os
-# 【正規の設定】書き込み制限とメモリパンクを避けるための環境設定
+# 【正規の設定】書き込み制限とパンクを避けるための環境設定
 os.environ["HOME"] = "/tmp"
 os.environ["HF_HOME"] = "/tmp/huggingface_cache"
 os.environ["XDG_CACHE_HOME"] = "/tmp/cache"
@@ -12,6 +12,7 @@ import re
 # --- 1. UI基本設定 ---
 st.set_page_config(page_title="Edulabo Visual Extractor", layout="wide")
 
+# サイドバーは認証前に配置（消えないようにするため）
 with st.sidebar:
     st.header("🧬 Edulabo 設定")
     export_format = st.selectbox("保存形式を選択", ["webp", "png"])
@@ -22,9 +23,9 @@ with st.sidebar:
         st.rerun()
 
 st.title("🧪 Edulabo PDF Visual Extractor")
-st.caption("認証ループ防止 ＆ 最新解析エンジン対応版")
+st.caption("教材資産化計画：最新の解析エンジン ＆ 認証ガード搭載版")
 
-# --- 2. 設定読み込み ---
+# --- 2. 設定読み込み (Secrets) ---
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
 REDIRECT_URI = st.secrets["REDIRECT_URI"]
@@ -36,22 +37,23 @@ def get_service():
     from google_auth_oauthlib.flow import Flow
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
     
-    # メモリに鍵があればそれを使う（URLのコードは無視）
+    # メモリに鍵があればそれを使う（URLのゴミは無視）
     if "google_auth_token" in st.session_state:
         creds = st.session_state["google_auth_token"]
         if creds and creds.valid:
             return build('drive', 'v3', credentials=creds)
 
-    # URLを確認。コードがあれば引き換える
+    # URLのコードを確認
     auth_code = st.query_params.get("code")
     if auth_code:
         try:
             flow = Flow.from_client_config(GOOGLE_CREDS_DICT, scopes=SCOPES, redirect_uri=REDIRECT_URI)
             flow.fetch_token(code=auth_code)
             st.session_state["google_auth_token"] = flow.credentials
-        except:
+        except Exception:
+            # コードが古い等のエラー時は静かにスルー
             pass
-        # 【重要】成功・失敗に関わらずURLを真っさらにして再起動
+        # 【重要】成功・失敗に関わらずURLを掃除して真っさらにして再起動
         st.query_params.clear()
         st.rerun() 
 
@@ -64,7 +66,7 @@ def get_service():
 
 service = get_service()
 
-# --- 4. 解析・保存処理 ---
+# --- 4. 解析・保存処理 (進捗バー付き) ---
 uploaded_files = st.file_uploader("PDFをアップロード", type=["pdf"], accept_multiple_files=True)
 
 if st.button("🚀 教材の解体と保存を開始"):
@@ -97,11 +99,11 @@ if st.button("🚀 教材の解体と保存を開始"):
                 f.write(uploaded_file.getbuffer())
             
             try:
-                status.info(f"🔍 {uploaded_file.name} を解析中...")
+                status.info(f"🔍 {uploaded_file.name} を構造解析中...")
                 bar.progress(30)
                 result = converter.convert(temp_path)
                 
-                # 【修正】インポートエラーを避け、ラベル名で図表を探す
+                # 【修正】ImportErrorを避け、名前ラベルで図表を特定
                 all_images = []
                 for item, _ in result.document.iterate_items():
                     if item.label in ["picture", "figure"]:
