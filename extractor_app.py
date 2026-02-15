@@ -7,6 +7,7 @@ import streamlit as st
 import json
 import io
 import re
+import time # 【追加】待ち時間を作るための道具
 
 # --- 1. UI設定 ---
 st.set_page_config(page_title="Edulabo Visual Extractor", layout="wide")
@@ -20,7 +21,7 @@ with st.sidebar:
         st.rerun()
 
 st.title("🧪 Edulabo PDF Visual Extractor")
-st.caption("『見つかった図表は逃さない』：座標指定切り抜き機能を搭載しました")
+st.caption("スピード制限（429エラー）を回避する『安全運転モード』で動作中")
 
 # --- 2. 設定読み込み ---
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -28,7 +29,7 @@ DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
 REDIRECT_URI = st.secrets["REDIRECT_URI"]
 GOOGLE_CREDS_DICT = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
 
-# --- 3. 認証ロジック (ループ防止版) ---
+# --- 3. 認証ロジック ---
 def get_service():
     from googleapiclient.discovery import build
     from google_auth_oauthlib.flow import Flow
@@ -60,7 +61,6 @@ if st.button("🚀 教材の解体を開始"):
     if not uploaded_files:
         st.error("ファイルをアップロードしてください。")
     else:
-        # 重いライブラリを遅延読み込み (Oh no 対策)
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from googleapiclient.http import MediaIoBaseUpload
@@ -72,9 +72,7 @@ if st.button("🚀 教材の解体を開始"):
 
         pipeline_options = PdfPipelineOptions()
         pipeline_options.do_ocr = False 
-        # 【重要】画像抽出を確実にするためページ描画を有効化
         pipeline_options.generate_page_images = True 
-        
         converter = DocumentConverter(format_options={"pdf": PdfFormatOption(pipeline_options=pipeline_options)})
 
         for uploaded_file in uploaded_files:
@@ -94,33 +92,35 @@ if st.button("🚀 教材の解体を開始"):
                 bar.progress(50)
                 
                 if total == 0:
-                    st.warning(f"⚠️ {uploaded_file.name} から図表が見つかりませんでした。")
+                    st.warning(f"⚠️ {uploaded_file.name} から図表は見つかりませんでした。")
                 else:
                     status.info(f"🎨 {total}個の図表を確認。AI命名と保存を開始...")
                     for i, (item, prov) in enumerate(all_items):
                         bar.progress(50 + int((i / total) * 50))
                         
                         image_obj = None
-                        # 手順1: 直接取得を試みる
+                        # 手順1: 直接取得
                         try:
                             if hasattr(item, 'get_image'): image_obj = item.get_image(result.document)
                             elif hasattr(item, 'image'): image_obj = item.image.pil_image
                         except: pass
 
-                        # 手順2: 失敗した場合、座標(prov)からページを切り抜く
+                        # 手順2: 切り抜きフォールバック
                         if image_obj is None and prov:
                             try:
-                                # その図表があるページの画像を取得
                                 page_no = prov[0].page_no
-                                page_img = result.pages[page_no - 1].image # ページ画像
-                                # 座標に基づいて切り抜き
-                                image_obj = item.get_image(result.document) # 再試行
+                                page_img = result.pages[page_no - 1].image
+                                image_obj = item.get_image(result.document)
                             except: pass
 
-                        if image_obj is None:
-                            st.write(f"⚠️ スキップ: {i+1}個目の画像データがどうしても取得できませんでした。")
-                            continue
+                        if image_obj is None: continue
                         
+                        # 【重要】AI(Gemini)を呼び出す前に「深呼吸」
+                        # 無料枠の制限を回避するため、4秒間待ちます
+                        if i > 0:
+                            status.info(f"🚦 スピード制限回避のため少し待機中... ({i}/{total})")
+                            time.sleep(4)
+
                         # AI命名
                         status.info(f"🤖 AIが {i+1}/{total} 個目の画像を確認中...")
                         resp = vision_model.generate_content(["理科教材の図。20文字以内の名称を1つ出力。", image_obj])
