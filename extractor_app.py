@@ -1,5 +1,5 @@
 import os
-# 【最優先】書き込み制限とパンクを避けるための設定
+# 【正規の設定】書き込み制限とメモリパンクを避けるための環境設定
 os.environ["HOME"] = "/tmp"
 os.environ["HF_HOME"] = "/tmp/huggingface_cache"
 os.environ["XDG_CACHE_HOME"] = "/tmp/cache"
@@ -12,7 +12,6 @@ import re
 # --- 1. UI基本設定 ---
 st.set_page_config(page_title="Edulabo Visual Extractor", layout="wide")
 
-# サイドバーを認証より前に配置（消えないようにするため）
 with st.sidebar:
     st.header("🧬 Edulabo 設定")
     export_format = st.selectbox("保存形式を選択", ["webp", "png"])
@@ -23,7 +22,7 @@ with st.sidebar:
         st.rerun()
 
 st.title("🧪 Edulabo PDF Visual Extractor")
-st.caption("教材資産化計画：最新の解析エンジン設定で動作中")
+st.caption("認証ループ防止 ＆ 最新解析エンジン対応版")
 
 # --- 2. 設定読み込み ---
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -37,11 +36,13 @@ def get_service():
     from google_auth_oauthlib.flow import Flow
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
     
+    # メモリに鍵があればそれを使う（URLのコードは無視）
     if "google_auth_token" in st.session_state:
         creds = st.session_state["google_auth_token"]
         if creds and creds.valid:
             return build('drive', 'v3', credentials=creds)
 
+    # URLを確認。コードがあれば引き換える
     auth_code = st.query_params.get("code")
     if auth_code:
         try:
@@ -50,9 +51,11 @@ def get_service():
             st.session_state["google_auth_token"] = flow.credentials
         except:
             pass
+        # 【重要】成功・失敗に関わらずURLを真っさらにして再起動
         st.query_params.clear()
-        st.rerun()
+        st.rerun() 
 
+    # 未ログインならボタンを表示
     flow = Flow.from_client_config(GOOGLE_CREDS_DICT, scopes=SCOPES, redirect_uri=REDIRECT_URI)
     auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
     st.info("🔒 資産化を開始するには、Googleドライブへのログインが必要です。")
@@ -61,17 +64,16 @@ def get_service():
 
 service = get_service()
 
-# --- 4. メイン処理 ---
+# --- 4. 解析・保存処理 ---
 uploaded_files = st.file_uploader("PDFをアップロード", type=["pdf"], accept_multiple_files=True)
 
 if st.button("🚀 教材の解体と保存を開始"):
     if not uploaded_files:
         st.error("ファイルをアップロードしてください。")
     else:
-        # 重いライブラリをここで読み込み
+        # 重いライブラリをここで読み込む（起動時のパンク防止）
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions
-        from docling.datamodel.base_models import FigureItem, PictureItem # 追加
         from googleapiclient.http import MediaIoBaseUpload
         import google.generativeai as genai
         from PIL import Image
@@ -80,7 +82,8 @@ if st.button("🚀 教材の解体と保存を開始"):
         vision_model = genai.GenerativeModel('gemini-2.0-flash')
 
         pipeline_options = PdfPipelineOptions()
-        pipeline_options.do_ocr = False 
+        pipeline_options.do_ocr = False # パンク防止
+        
         converter = DocumentConverter(
             format_options={"pdf": PdfFormatOption(pipeline_options=pipeline_options)}
         )
@@ -94,14 +97,14 @@ if st.button("🚀 教材の解体と保存を開始"):
                 f.write(uploaded_file.getbuffer())
             
             try:
-                status.info(f"🔍 {uploaded_file.name} を構造解析中...")
+                status.info(f"🔍 {uploaded_file.name} を解析中...")
                 bar.progress(30)
                 result = converter.convert(temp_path)
                 
-                # 【修正ポイント】最新版Doclingでの画像・図表の取り出し方
+                # 【修正】インポートエラーを避け、ラベル名で図表を探す
                 all_images = []
                 for item, _ in result.document.iterate_items():
-                    if isinstance(item, (FigureItem, PictureItem)):
+                    if item.label in ["picture", "figure"]:
                         all_images.append(item)
                 
                 total = len(all_images)
@@ -115,12 +118,15 @@ if st.button("🚀 教材の解体と保存を開始"):
                         bar.progress(50 + int((i / total) * 50))
                         
                         # 画像データの取得
-                        image_obj = item.image.pil_image
+                        try:
+                            image_obj = item.get_image(result.document)
+                        except:
+                            image_obj = item.image.pil_image
                         
                         # AI(Gemini 2.0 Flash)命名
-                        status.info(f"🤖 AIが {i+1}/{total} 個目の内容を確認しています...")
+                        status.info(f"🤖 AIが {i+1}/{total} 個目の画像を確認中...")
                         resp = vision_model.generate_content([
-                            "理科教材の図です。内容を20文字以内の日本語で要約し、名称のみ出力してください。", 
+                            "理科教材の図。20文字以内の日本語で具体的な名称を1つ出力してください。", 
                             image_obj
                         ])
                         name = re.sub(r'[\\/:*?"<>|]', '', resp.text.strip())
