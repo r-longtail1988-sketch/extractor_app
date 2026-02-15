@@ -1,5 +1,4 @@
 import os
-# システム部品とAIモデルの保存先を書き込み可能な場所に固定
 os.environ["HF_HOME"] = "/tmp/huggingface_cache"
 os.environ["XDG_CACHE_HOME"] = "/tmp/cache"
 
@@ -15,28 +14,30 @@ from googleapiclient.http import MediaIoBaseUpload
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 
-# --- ページ設定 ---
+# --- ページ基本設定 ---
 st.set_page_config(page_title="Edulabo Visual Extractor", layout="wide")
 st.title("🧪 Edulabo PDF Visual Extractor")
-st.caption("教材資産化計画：図表の自動解体・命名・クラウド保存エンジン")
+st.caption("教材資産化計画：ログインに成功すると解析画面に切り替わります")
 
-# --- Secretsからの設定読み込み ---
+# --- 設定の読み込み ---
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
 REDIRECT_URI = st.secrets["REDIRECT_URI"]
 GOOGLE_CREDS_DICT = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
 
-# Gemini (Vision) の初期化
 genai.configure(api_key=GEMINI_API_KEY)
 vision_model = genai.GenerativeModel('gemini-2.0-flash')
 
-# --- Google Drive 認証 (ログイン先行型) ---
-def check_auth():
+# --- 認証チェック関数 (無限ループ防止強化版) ---
+def get_authenticated_service():
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
+    
+    # 1. すでに認証済みの場合は即座にサービスを返す（URLのチェックはしない）
     if "google_auth_token" in st.session_state:
         creds = st.session_state["google_auth_token"]
         if creds and creds.valid:
             return build('drive', 'v3', credentials=creds)
+        # 期限切れなら更新を試みる
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
@@ -45,19 +46,27 @@ def check_auth():
             except:
                 st.session_state.pop("google_auth_token")
 
+    # 2. URLを確認し、Googleからの戻り（code）があるかチェック
     auth_code = st.query_params.get("code")
+    
     if auth_code:
+        # 3. コードがある場合：一度だけ交換を試みる
         try:
             flow = Flow.from_client_config(GOOGLE_CREDS_DICT, scopes=SCOPES, redirect_uri=REDIRECT_URI)
             flow.fetch_token(code=auth_code)
             st.session_state["google_auth_token"] = flow.credentials
+            # 【重要】成功したら即座にURLのコードを消してリロード
+            st.query_params.clear()
+            st.rerun() 
+        except Exception:
+            # 失敗した（二重使用など）場合はURLを掃除してやり直し
             st.query_params.clear()
             st.rerun()
-        except:
-            st.query_params.clear()
 
+    # 4. 未ログイン状態：ログインボタンを表示して処理を止める
     flow = Flow.from_client_config(GOOGLE_CREDS_DICT, scopes=SCOPES, redirect_uri=REDIRECT_URI)
     auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+    
     st.warning("🔒 続行するには Google ドライブへのログインが必要です。")
     st.link_button("🔑 Google アカウントでログインする", auth_url)
     st.stop()
@@ -74,8 +83,10 @@ def generate_smart_name(image_bytes, original_name, index):
         return f"{os.path.splitext(original_name)[0]}_{index:02}_extracted"
 
 # --- メイン処理 ---
-service = check_auth()
+# 認証をチェック（未ログインならここで停止する）
+service = get_authenticated_service()
 
+# ログイン成功後のみ表示されるUI
 st.sidebar.header("🔧 出力設定")
 export_format = st.sidebar.selectbox("保存形式を選択", ["webp", "png"])
 if st.sidebar.button("♻️ ログアウト"):
@@ -90,7 +101,6 @@ if st.button("🚀 教材の解体と保存を開始"):
         st.error("ファイルをアップロードしてください。")
     else:
         converter = DocumentConverter()
-        
         for uploaded_file in uploaded_files:
             st.info(f"📄 {uploaded_file.name} を解析中...")
             temp_path = f"/tmp/{uploaded_file.name}"
@@ -98,48 +108,30 @@ if st.button("🚀 教材の解体と保存を開始"):
                 f.write(uploaded_file.getbuffer())
             
             try:
-                # 1. PDFを解析
                 result = converter.convert(temp_path)
-                
-                # 2. 図表を抽出してループ
-                # Doclingの画像抽出結果にアクセス
                 images_found = 0
                 for i, element in enumerate(result.document.figures):
                     images_found += 1
-                    # 画像データの取得
                     image_obj = element.image.pil_image
                     
-                    # 3. AIによる命名
+                    # 命名と保存の実行（実務部分）
                     img_byte_arr = io.BytesIO()
                     image_obj.save(img_byte_arr, format='PNG')
                     smart_name = generate_smart_name(img_byte_arr.getvalue(), uploaded_file.name, i)
                     
-                    # 4. 指定形式に変換
                     final_img_byte_arr = io.BytesIO()
                     image_obj.save(final_img_byte_arr, format=export_format.upper())
                     final_img_byte_arr.seek(0)
                     
-                    # 5. Googleドライブへアップロード
-                    file_metadata = {
-                        'name': f"{smart_name}.{export_format}",
-                        'parents': [DRIVE_FOLDER_ID]
-                    }
-                    media = MediaIoBaseUpload(
-                        final_img_byte_arr, 
-                        mimetype=f'image/{export_format}', 
-                        resumable=True
-                    )
+                    file_metadata = {'name': f"{smart_name}.{export_format}", 'parents': [DRIVE_FOLDER_ID]}
+                    media = MediaIoBaseUpload(final_img_byte_arr, mimetype=f'image/{export_format}', resumable=True)
                     service.files().create(body=file_metadata, media_body=media, fields='id').execute()
                     
                     st.write(f"  📸 抽出成功: {smart_name}.{export_format}")
 
-                st.success(f"✅ {uploaded_file.name} から {images_found} 個の図表を保存しました！")
-                
+                st.success(f"✅ {uploaded_file.name} の図表を保存しました！")
             except Exception as e:
-                st.error(f"解析エラー ({uploaded_file.name}): {e}")
+                st.error(f"解析エラー: {e}")
             finally:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
-
-st.divider()
-st.info("💡 ヒント: 保存された画像は Google ドライブの指定フォルダで確認できます。")
