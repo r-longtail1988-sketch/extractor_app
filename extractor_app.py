@@ -1,17 +1,18 @@
 import os
-# 【最優先】ライブラリが読み込まれる前に、書き込み可能な場所を強制指定します
+# 【最重要】ライブラリを読み込む「前」に、システム全体の「家」を一時フォルダに設定します
+os.environ["HOME"] = "/tmp"
 os.environ["HF_HOME"] = "/tmp/huggingface_cache"
 os.environ["XDG_CACHE_HOME"] = "/tmp/cache"
-os.environ["TORCH_HOME"] = "/tmp/torch_cache"
-os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib_cache"
 
-# フォルダが存在しない場合に備えて作成
-for path in [os.environ["HF_HOME"], os.environ["XDG_CACHE_HOME"], os.environ["TORCH_HOME"]]:
+# 必要なフォルダを強制的に作成
+for path in [os.environ["HF_HOME"], os.environ["XDG_CACHE_HOME"]]:
     os.makedirs(path, exist_ok=True)
 
 import streamlit as st
 import google.generativeai as genai
 from docling.document_converter import DocumentConverter
+from docling.datamodel.pipeline_options import PdfPipelineOptions # 追加
+from docling.document_converter import PdfFormatOption # 追加
 from PIL import Image
 import io
 import json
@@ -24,7 +25,7 @@ from google.auth.transport.requests import Request
 # --- ページ設定 ---
 st.set_page_config(page_title="Edulabo Visual Extractor", layout="wide")
 st.title("🧪 Edulabo PDF Visual Extractor")
-st.caption("教材資産化計画：解析エンジンの権限設定を最適化しました")
+st.caption("教材資産化計画：解析エンジンの動作環境を強制最適化しました")
 
 # --- Secretsからの設定読み込み ---
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -95,9 +96,17 @@ if st.button("🚀 教材の解体と保存を開始"):
     if not uploaded_files:
         st.error("ファイルをアップロードしてください。")
     else:
-        # 解析エンジンの初期化（ここで一時フォルダが使われます）
         try:
-            converter = DocumentConverter()
+            # 解析オプションの設定：OCRモデルの読み込み場所を制限
+            pipeline_options = PdfPipelineOptions()
+            pipeline_options.do_ocr = True # 図表内の文字認識を有効化
+            
+            # コンバーターの初期化
+            converter = DocumentConverter(
+                format_options={
+                    "pdf": PdfFormatOption(pipeline_options=pipeline_options)
+                }
+            )
             
             for uploaded_file in uploaded_files:
                 st.info(f"📄 {uploaded_file.name} を解析中...")
