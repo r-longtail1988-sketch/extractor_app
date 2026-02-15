@@ -5,10 +5,10 @@ from PIL import Image
 import io
 import os
 import re
-import pickle
+import json
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 
 # --- ページ基本設定 ---
@@ -16,30 +16,49 @@ st.set_page_config(page_title="Edulabo Visual Extractor", layout="wide")
 st.title("🧪 Edulabo PDF Visual Extractor")
 st.caption("教材資産化計画：図表の自動解体・クラウド保存エンジン")
 
-# --- 設定の読み込み ---
+# --- 設定の読み込み (Secretsから) ---
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
+# credentials.jsonの中身を文字列として取得
+GOOGLE_CREDS_DICT = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
 
 # Geminiの初期化
 genai.configure(api_key=GEMINI_API_KEY)
 vision_model = genai.GenerativeModel('gemini-2.0-flash')
 
-# --- Google Drive 認証関数 ---
+# --- Google Drive 認証関数 (ウェブアプリ版) ---
 def get_drive_service():
-    # 録音アプリからコピーした credentials.json を使用
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
     creds = None
-    if os.path.exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
-            creds = pickle.load(token)
+    
+    # セッション状態に認証情報を保持
+    if "google_auth_token" in st.session_state:
+        creds = st.session_state["google_auth_token"]
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(creds, token)
+            # Secretsから読み込んだ辞書データを使用してフローを作成
+            flow = Flow.from_client_config(
+                GOOGLE_CREDS_DICT,
+                scopes=SCOPES,
+                redirect_uri=st.secrets["REDIRECT_URI"]
+            )
+            
+            # URLパラメータから認証コードを取得
+            auth_code = st.query_params.get("code")
+            if not auth_code:
+                # 認証用URLを生成してユーザーにクリックしてもらう
+                auth_url, _ = flow.authorization_url(prompt='consent')
+                st.link_button("🔑 Googleドライブへのアクセスを許可する", auth_url)
+                st.stop()
+            
+            # 認証コードをトークンに交換
+            flow.fetch_token(code=auth_code)
+            creds = flow.credentials
+            st.session_state["google_auth_token"] = creds
+            
     return build('drive', 'v3', credentials=creds)
 
 # --- AIによるファイル名生成 ---
@@ -61,6 +80,7 @@ if st.button("🚀 教材の解体と保存を開始"):
     if not uploaded_files:
         st.error("ファイルをアップロードしてください。")
     else:
+        # 認証実行
         service = get_drive_service()
         converter = DocumentConverter()
         
@@ -75,15 +95,13 @@ if st.button("🚀 教材の解体と保存を開始"):
             # Doclingで解析
             conv_result = converter.convert(temp_name)
             
-            # 画像の抽出とアップロード（Doclingの構造に従ってループ）
-            # ※ 実際にはresult.document.pictures などの要素を処理します
-            # ここではプロトタイプとして、解析成功のフローを構築しています
+            # ここに画像の抽出とアップロード処理を記述
+            # (現在はプロトタイプ表示のみ)
             
             st.success(f"✅ {uploaded_file.name} のすべての図表を Google ドライブに保存しました。")
             
-            # 一時ファイルの削除
             if os.path.exists(temp_name):
                 os.remove(temp_name)
 
 st.divider()
-st.info("💡 ヒント: Googleドライブの指定フォルダを確認してください。AIが命名したWebP/PNGファイルが並んでいるはずです。")
+st.info("💡 ヒント: 職場のPCからでもブラウザでアクセス可能です。")
