@@ -20,7 +20,7 @@ with st.sidebar:
         st.rerun()
 
 st.title("🧪 Edulabo PDF Visual Extractor")
-st.caption("最新のAIモデルと解析エンジンで動作中")
+st.caption("図表の『空振り』を防止する安全装置を搭載しました")
 
 # --- 2. 設定読み込み ---
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -28,7 +28,7 @@ DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
 REDIRECT_URI = st.secrets["REDIRECT_URI"]
 GOOGLE_CREDS_DICT = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
 
-# --- 3. 認証ロジック (ループ防止版) ---
+# --- 3. 認証ロジック ---
 def get_service():
     from googleapiclient.discovery import build
     from google_auth_oauthlib.flow import Flow
@@ -61,11 +61,10 @@ if st.button("🚀 教材の解体と保存を開始"):
     if not uploaded_files:
         st.error("ファイルをアップロードしてください。")
     else:
-        # 重いライブラリをここで読み込み（起動時のエラーを防ぐ）
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from googleapiclient.http import MediaIoBaseUpload
-        import google.generativeai as genai # 互換性のため一旦こちらを維持
+        import google.generativeai as genai
         from PIL import Image
 
         genai.configure(api_key=GEMINI_API_KEY)
@@ -89,27 +88,37 @@ if st.button("🚀 教材の解体と保存を開始"):
                 bar.progress(30)
                 result = converter.convert(temp_path)
                 
-                # 【修正】エラーの原因だった特定のインポートを使わず、名前で図表を探す
-                all_images = []
+                # 図表候補の抽出
+                all_items = []
                 for item, _ in result.document.iterate_items():
                     if item.label in ["picture", "figure"]:
-                        all_images.append(item)
+                        all_items.append(item)
                 
-                total = len(all_images)
+                total = len(all_items)
                 bar.progress(50)
                 
                 if total == 0:
                     st.warning(f"⚠️ {uploaded_file.name} から図表は見つかりませんでした。")
                 else:
-                    status.info(f"🎨 {total}個の図表を確認。AI命名と保存を開始...")
-                    for i, item in enumerate(all_images):
+                    status.info(f"🎨 {total}個の候補を確認。AI命名と保存を開始...")
+                    for i, item in enumerate(all_items):
                         bar.progress(50 + int((i / total) * 50))
                         
-                        # 画像データの取得
+                        # 【修正】画像データの確実な取得と空振りチェック
+                        image_obj = None
                         try:
-                            image_obj = item.get_image(result.document)
-                        except:
-                            image_obj = item.image.pil_image
+                            # 複数の取得方法を試行
+                            if hasattr(item, 'get_image'):
+                                image_obj = item.get_image(result.document)
+                            elif hasattr(item, 'image') and item.image is not None:
+                                image_obj = item.image.pil_image
+                        except Exception:
+                            pass
+
+                        # 画像が取れなかった場合はエラーにせずスキップ
+                        if image_obj is None:
+                            st.write(f"⚠️ スキップ: {i+1}個目の要素から画像データを抽出できませんでした。")
+                            continue
                         
                         # AI命名
                         status.info(f"🤖 AIが {i+1}/{total} 個目の画像を確認中...")
