@@ -1,9 +1,13 @@
+import os
+# 【重要】ライブラリがデータを書き込める場所を指定します（エラー回避用）
+os.environ["HF_HOME"] = "/tmp/huggingface_cache"
+os.environ["XDG_CACHE_HOME"] = "/tmp/cache"
+
 import streamlit as st
 import google.generativeai as genai
 from docling.document_converter import DocumentConverter
 from PIL import Image
 import io
-import os
 import re
 import json
 from googleapiclient.discovery import build
@@ -26,16 +30,13 @@ GOOGLE_CREDS_DICT = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
 genai.configure(api_key=GEMINI_API_KEY)
 vision_model = genai.GenerativeModel('gemini-2.0-flash')
 
-# --- Google Drive 認証関数 (強化版) ---
+# --- Google Drive 認証関数 ---
 def get_drive_service():
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
-    
-    # 1. すでにセッション内に有効な認証情報があればそれを使う
     if "google_auth_token" in st.session_state:
         creds = st.session_state["google_auth_token"]
         if creds and creds.valid:
             return build('drive', 'v3', credentials=creds)
-        # 期限切れならリフレッシュを試みる
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
@@ -44,34 +45,23 @@ def get_drive_service():
             except:
                 pass
 
-    # 2. 認証フローの作成
-    flow = Flow.from_client_config(
-        GOOGLE_CREDS_DICT,
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
-    )
-    
-    # URLから認証コードを取得
+    flow = Flow.from_client_config(GOOGLE_CREDS_DICT, scopes=SCOPES, redirect_uri=REDIRECT_URI)
     auth_code = st.query_params.get("code")
     
-    # 3. コードがない場合はログインボタンを表示
     if not auth_code:
         auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
         st.info("💡 実行前にGoogleドライブへのアクセス許可が必要です。")
         st.link_button("🔑 Googleドライブへのアクセスを許可する", auth_url)
         st.stop()
     
-    # 4. コードがある場合はトークンへの交換を試みる
     try:
         flow.fetch_token(code=auth_code)
         st.session_state["google_auth_token"] = flow.credentials
-        # 成功したらURLからコードを削除してリロード（InvalidGrantError対策）
         st.query_params.clear()
         st.rerun()
-    except Exception as e:
-        # 失敗した場合はURLをクリアしてやり直しを促す
+    except:
         st.query_params.clear()
-        st.error(f"認証に失敗しました。URLをクリアしましたので、もう一度やり直してください。")
+        st.error("認証に失敗しました。もう一度やり直してください。")
         st.stop()
 
 # --- AIによるファイル名生成 ---
@@ -82,7 +72,7 @@ def generate_smart_name(image, original_name, page_num, index):
         summary = re.sub(r'[\\/:*?"<>|]', '', response.text.strip())
         return f"{os.path.splitext(original_name)[0]}_P{page_num:03}_{index:02}_{summary}"
     except:
-        return f"{os.path.splitext(original_name)[0]}_P{page_num:03}_{index:02}_extracted_image"
+        return f"{os.path.splitext(original_name)[0]}_P{page_num:03}_{index:02}_extracted"
 
 # --- メインUI ---
 st.sidebar.header("🔧 出力設定")
@@ -93,26 +83,29 @@ if st.button("🚀 教材の解体と保存を開始"):
     if not uploaded_files:
         st.error("ファイルをアップロードしてください。")
     else:
-        # 認証実行
         service = get_drive_service()
+        # ここで解析エンジンの読み込み（環境変数の設定により /tmp を使います）
         converter = DocumentConverter()
         
         for uploaded_file in uploaded_files:
             st.info(f"📄 {uploaded_file.name} を解析中...")
-            temp_name = f"temp_{uploaded_file.name}"
-            with open(temp_name, "wb") as f:
+            temp_path = f"/tmp/{uploaded_file.name}"
+            with open(temp_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             
             try:
-                # 解析実行
-                conv_result = converter.convert(temp_name)
-                # (ここに具体的なアップロード処理を追加可能)
-                st.success(f"✅ {uploaded_file.name} の解析が完了しました。")
+                # PDFの解析実行
+                conv_result = converter.convert(temp_path)
+                
+                # ここにGoogleドライブへの保存処理（MediaIoBaseUpload等）が入ります
+                # まずは解析がエラーなく通るかを確認しましょう
+                
+                st.success(f"✅ {uploaded_file.name} の解析が完了しました！")
             except Exception as e:
                 st.error(f"解析エラー: {e}")
             finally:
-                if os.path.exists(temp_name):
-                    os.remove(temp_name)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
 
 st.divider()
-st.info("💡 ヒント: 一度許可すれば、ブラウザを閉じるまで認証は維持されます。")
+st.info("💡 ヒント: 初回の解析はモデルの準備に少し時間がかかる場合があります。")
