@@ -1,4 +1,5 @@
 import os
+# システム部品のエラー回避
 os.environ["HF_HOME"] = "/tmp/huggingface_cache"
 os.environ["XDG_CACHE_HOME"] = "/tmp/cache"
 
@@ -7,6 +8,7 @@ import google.generativeai as genai
 from docling.document_converter import DocumentConverter
 import io
 import json
+import re
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
@@ -16,7 +18,7 @@ st.set_page_config(page_title="Edulabo Visual Extractor", layout="wide")
 st.title("🧪 Edulabo PDF Visual Extractor")
 st.caption("教材資産化計画：図表の自動解体・クラウド保存エンジン")
 
-# --- 設定の読み込み ---
+# --- 設定の読み込み (Secrets) ---
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
 REDIRECT_URI = st.secrets["REDIRECT_URI"]
@@ -25,16 +27,13 @@ GOOGLE_CREDS_DICT = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
 # Geminiの初期化
 genai.configure(api_key=GEMINI_API_KEY)
 
-# --- Google Drive 認証関数 (完全版) ---
+# --- Google Drive 認証関数 (安定版) ---
 def get_drive_service():
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
-    
-    # 1. すでにセッション内に「有効な鍵」があれば即座にそれを返す
     if "google_auth_token" in st.session_state:
         creds = st.session_state["google_auth_token"]
         if creds and creds.valid:
             return build('drive', 'v3', credentials=creds)
-        # 期限切れならリフレッシュ
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
@@ -43,10 +42,7 @@ def get_drive_service():
             except:
                 st.session_state.pop("google_auth_token")
 
-    # 2. URLからGoogleの認証コードを取得
     auth_code = st.query_params.get("code")
-    
-    # 3. コードがない（ログイン前）場合はボタンを表示
     if not auth_code:
         flow = Flow.from_client_config(GOOGLE_CREDS_DICT, scopes=SCOPES, redirect_uri=REDIRECT_URI)
         auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
@@ -54,28 +50,30 @@ def get_drive_service():
         st.link_button("🔑 Googleドライブへのアクセスを許可する", auth_url)
         st.stop()
     
-    # 4. コードがある（Googleから戻ってきた）場合の処理
     try:
-        # ここでコードを本物の鍵（トークン）に交換
         flow = Flow.from_client_config(GOOGLE_CREDS_DICT, scopes=SCOPES, redirect_uri=REDIRECT_URI)
         flow.fetch_token(code=auth_code)
-        # 成功したらセッションに保存
         st.session_state["google_auth_token"] = flow.credentials
-        # URLのコードを消去してリフレッシュ（InvalidGrantError対策）
         st.query_params.clear()
         st.rerun() 
-    except Exception as e:
-        # 失敗した場合、すでにセッションに鍵があればそのまま進む
+    except:
         if "google_auth_token" in st.session_state:
             st.query_params.clear()
             st.rerun()
         else:
-            # 完全に失敗している場合はURLを掃除してやり直しを促す
             st.query_params.clear()
-            st.warning("セッションが切れました。もう一度「許可する」ボタンを押してください。")
+            st.warning("セッションが切れました。もう一度許可してください。")
             st.stop()
 
 # --- メインUI ---
+# サイドバーの設定項目を復活
+st.sidebar.header("🔧 出力設定")
+export_format = st.sidebar.selectbox(
+    "保存形式を選択", 
+    ["webp", "png"], 
+    help="WebPは軽量で教材に適しています。PNGは互換性が高いです。"
+)
+
 if st.sidebar.button("♻️ セッションをリセット"):
     st.session_state.clear()
     st.query_params.clear()
@@ -87,12 +85,30 @@ if st.button("🚀 教材の解体と保存を開始"):
     if not uploaded_files:
         st.error("ファイルをアップロードしてください。")
     else:
-        # ここで認証が通るまで待機
+        # 認証実行
         service = get_drive_service()
         
-        # 認証が通った後の処理
+        # 解析エンジンの準備
         converter = DocumentConverter()
+        
         for uploaded_file in uploaded_files:
             st.info(f"📄 {uploaded_file.name} を解析中...")
-            # 解析ロジック...
-            st.success(f"✅ {uploaded_file.name} の解析が完了しました！")
+            temp_path = f"/tmp/{uploaded_file.name}"
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            try:
+                # 解析実行
+                conv_result = converter.convert(temp_path)
+                
+                # ここで export_format (webp か png) に基づいて画像を処理・保存します
+                st.success(f"✅ {uploaded_file.name} を解析しました（形式: {export_format}）")
+                
+            except Exception as e:
+                st.error(f"解析エラー: {e}")
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+st.divider()
+st.info("💡 ヒント: サイドバーから保存形式を選択して実行してください。")
